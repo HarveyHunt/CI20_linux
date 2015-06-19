@@ -110,6 +110,11 @@
 
 		};
 
+        pwm: jz4780-pwm@0x10002010 {
+            compatible = "ingenic,jz4780-pwm";
+            reg = <0x10002010 0x128>;
+        };
+
 		pinctrl@0x10010000 {
 			compatible = "ingenic,jz4780-pinctrl";
 			reg = <0x10010000 0x600>;
