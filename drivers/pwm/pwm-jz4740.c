@@ -25,6 +25,8 @@
 
 #define NUM_PWM 8
 
+/* NOTE: In the DT, the pwm location ends in 0x10, hence these values
+ * being 0x10 less than is mentioned in the JZ manual. */
 #define TCU_TSR_OFFSET	0x0C /* Timer Stop register */
 #define TCU_TSSR_OFFSET	0x1C
 #define TCU_TSCR_OFFSET	0x2C
@@ -230,6 +232,7 @@ static int jz4740_pwm_remove(struct platform_device *pdev)
 static const struct of_device_id jz4740_pwm_dt_ids[] = {
 	{ .compatible = "ingenic,jz4740-pwm", .data = NULL, },
 	{ .compatible = "ingenic,jz4770-pwm", .data = NULL, },
+	{ .compatible = "ingenic,jz4780-pwm", .data = NULL, },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, jz4740_pwm_dt_ids);
