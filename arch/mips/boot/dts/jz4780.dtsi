@@ -113,6 +113,8 @@
         pwm: jz4780-pwm@0x10002010 {
             compatible = "ingenic,jz4780-pwm";
             reg = <0x10002010 0x128>;
+
+            #pwm-cells = <3>;
         };
 
 		pinctrl@0x10010000 {
@@ -347,6 +349,54 @@
 					ingenic,pins = <&gpa 21 0 &pincfg_nobias>; /* cs1 */
 				};
 			};
+
+            pinfunc_pwm0: pwm0 {
+                pinfunc_pwm0_data: pwm0-data {
+                    ingenic,pins = <&gpe 0 0 &pincfg_nobias>;
+                };
+            };
+
+            pinfunc_pwm1: pwm1 {
+                pinfunc_pwm1_data: pwm1-data {
+                    ingenic,pins = <&gpe 1 0 &pincfg_nobias>;
+                };
+            };
+
+            pinfunc_pwm2: pwm2 {
+                pinfunc_pwm2_data: pwm2-data {
+                    ingenic,pins = <&gpe 2 0 &pincfg_nobias>;
+                };
+            };
+
+            pinfunc_pwm3: pwm3 {
+                pinfunc_pwm3_data: pwm3-data {
+                    ingenic,pins = <&gpe 3 0 &pincfg_nobias>;
+                };
+            };
+
+            pinfunc_pwm4: pwm4 {
+                pinfunc_pwm4_data: pwm4-data {
+                    ingenic,pins = <&gpe 4 0 &pincfg_nobias>;
+                };
+            };
+
+            pinfunc_pwm5: pwm5 {
+                pinfunc_pwm5_data_data: pwm5-data {
+                    ingenic,pins = <&gpe 5 0 &pincfg_nobias>;
+                };
+            };
+
+            pinfunc_pwm6: pwm6 {
+                pinfunc_pwm6_data_data: pwm6-data {
+                    ingenic,pins = <&gpd 10 0 &pincfg_nobias>;
+                };
+            };
+
+            pinfunc_pwm7: pwm7 {
+                pinfunc_pwm7_data_data: pwm7-data {
+                    ingenic,pins = <&gpd 11 0 &pincfg_nobias>;
+                };
+            };
 
 			pinfunc_i2c0: i2c0 {
 				pins_i2c0_data: i2c0-data{
