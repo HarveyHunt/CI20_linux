@@ -31,6 +31,7 @@
 #include <linux/of_gpio.h>
 #include <linux/platform_device.h>
 #include <linux/scatterlist.h>
+#include <linux/slab.h>
 
 #include <linux/platform_data/mmc-jz47xx.h>
 
@@ -155,6 +156,19 @@ enum jz47xx_mmc_state {
 	JZ_MMC_STATE_DONE,
 };
 
+struct jz4780_sdma_desc {
+	volatile u32 nda;
+	volatile u32 da;
+	volatile u32 len;
+	volatile u32 dma_cmd;
+};
+
+struct jz4780_sdma_desc_hd {
+	struct jz4780_sdma_desc *dma_desc;
+	dma_addr_t dma_desc_phys_addr;
+	struct jz4780_sdma_desc_hd *next;
+};
+
 struct jz47xx_mmc_host {
 	struct mmc_host *mmc;
 	struct platform_device *pdev;
@@ -171,6 +185,8 @@ struct jz47xx_mmc_host {
 	struct mmc_request *req;
 	struct mmc_command *cmd;
 	struct dma_async_tx_descriptor *desc;
+
+	struct jz4780_sdma_desc_hd desc_hds[JZ_MMC_MAX_SEGS];
 
 	unsigned long waiting;
 
@@ -561,10 +577,126 @@ static void jz47xx_mmc_read_response(struct jz47xx_mmc_host *host,
 	}
 }
 
+static int __init jz4780_mmc_init_dma(struct jz47xx_mmc_host *host)
+{
+	struct jz4780_sdma_desc *next;
+	void *desc_mem;
+	unsigned int i = 0;
+
+	desc_mem = (struct jz4780_sdma_desc *)get_zeroed_page(GFP_KERNEL);
+	if (!desc_mem) {
+		dev_err(&host->pdev->dev, "failed to allocate DMA descriptor mem\n");
+		return -ENODEV;
+	}
+
+	host->desc_hds[0].dma_desc = ioremap_nocache(virt_to_phys(desc_mem), PAGE_SIZE);
+	if (!host->desc_hds[0].dma_desc) {
+		dev_err(&host->pdev->dev, "ioremap of DMA descriptor failed\n");
+		kfree(desc_mem);
+		return -ENODEV;
+	}
+
+	next = host->desc_hds[0].dma_desc;
+
+	for (i = 0; i < JZ_MMC_MAX_SEGS; ++i) {
+		struct jz4780_sdma_desc_hd *dhd = &host->desc_hds[i];
+		dhd->dma_desc = next;
+		dhd->dma_desc_phys_addr = CPHYSADDR((uint32_t) dhd->dma_desc);
+		next++;
+		dhd->next = dhd + 1;
+	}
+	host->desc_hds[JZ_MMC_MAX_SEGS - 1].next = NULL;
+
+	return 0;
+}
+
+static inline void jz4780_mmc_start_dma(struct jz47xx_mmc_host *host,
+					struct mmc_data *data)
+{
+	dma_addr_t dma_addr = sg_phys(data->sg);
+	uint32_t dmac, dma_len = sg_dma_len(data->sg);
+
+
+	dmac = JZ_MMC_DMAC_DMA_EN | JZ_MMC_DMAC_INCR32;
+
+	if ((dma_addr & 0x3) || (dma_len & 0x3)) {
+		dmac |= JZ_MMC_DMAC_ALIGN_EN;
+		if (dma_addr & 0x3)
+			dmac |= (dma_addr % 4) << JZ_MMC_DMAC_AOFST_SHFT;
+	}
+	writel(host->desc_hds[0].dma_desc_phys_addr,
+				host->base + JZ_REG_MMC_DMANDA);
+	writel(dmac, host->base + JZ_REG_MMC_DMAC);
+}
+
+static void jz4780_mmc_submit_dma(struct jz47xx_mmc_host *host, struct mmc_data *data)
+{
+	int i = 0;
+	struct scatterlist *sg_entry;
+	struct jz4780_sdma_desc_hd *dhd = &(host->desc_hds[0]);
+
+	dma_map_sg(&host->pdev->dev, data->sg, data->sg_len,
+		   data->flags & MMC_DATA_WRITE
+		   ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
+
+	for_each_sg(data->sg, sg_entry, data->sg_len, i) {
+		dhd->dma_desc->da = sg_phys(sg_entry);
+		dhd->dma_desc->len = sg_dma_len(sg_entry);
+		dhd->dma_desc->dma_cmd = JZ_MMC_DMACMD_LINK;
+
+		if ((data->sg_len - i) > 1) {
+			if (unlikely(dhd->next == NULL)) {
+				dev_err(&host->pdev->dev, "dhd->next == NULL\n");
+			} else {
+				dhd->dma_desc->nda = dhd->next->dma_desc_phys_addr;
+				dhd = dhd->next;
+			}
+		}
+	}
+
+	dma_unmap_sg(&host->pdev->dev, data->sg, data->sg_len,
+		     data->flags & MMC_DATA_WRITE
+		     ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
+
+	if (data->flags & MMC_DATA_READ)
+		dhd->dma_desc->dma_cmd |= JZ_MMC_DMACMD_ENDI;
+	dhd->dma_desc->dma_cmd &= ~JZ_MMC_DMACMD_LINK;
+}
+
+static bool jz4780_mmc_prepare_dma_transfer(struct jz47xx_mmc_host *host)
+{
+	struct mmc_command *cmd = host->req->cmd;
+	struct mmc_data *data = cmd->data;
+	uint32_t cmdat = 0, imask;
+
+	if(!host->desc_hds)
+		return false;
+
+	if (data->flags & MMC_DATA_WRITE) {
+		cmdat |= JZ_MMC_CMDAT_WRITE;
+		imask = JZ_MMC_IMASK_PRG_DONE
+			| JZ_MMC_IMASK_CRC_WRITE_ERR;
+	} else {
+		cmdat &= JZ_MMC_CMDAT_WRITE;
+		imask = JZ_MMC_IMASK_TIMEOUT_READ
+			| JZ_MMC_IMASK_DATA_TRAN_DONE
+			| JZ_MMC_IMASK_CRC_READ_ERR;
+	}
+
+	host->cmdat |= cmdat;
+	writel(cmdat, host->base + JZ_REG_MMC_CMDAT);
+
+	jz47xx_mmc_write_irq_reg(host, JZ_MMC_IMASK_PRG_DONE);
+	jz47xx_mmc_set_irq_enabled(host, imask, true);
+	return true;
+}
+
+
 static void jz47xx_mmc_send_command(struct jz47xx_mmc_host *host,
 	struct mmc_command *cmd)
 {
 	uint32_t cmdat = host->cmdat;
+	bool use_sdma = false;
 
 	host->cmdat &= ~JZ_MMC_CMDAT_INIT;
 	jz47xx_mmc_clock_disable(host);
@@ -600,23 +732,16 @@ static void jz47xx_mmc_send_command(struct jz47xx_mmc_host *host,
 		writew(cmd->data->blocks, host->base + JZ_REG_MMC_NOB);
 
 		/* Fall back to PIO if we have no DMA channel or setup fails. */
-		host->desc = jz47xx_mmc_prepare_dma_transfer(host);
+		if (host->version >= JZ_MMC_JZ4780)
+			use_sdma = jz4780_mmc_prepare_dma_transfer(host);
+		else
+			host->desc = jz47xx_mmc_prepare_dma_transfer(host);
+
 		if (host->desc) {
-			/*
-			 * The 4780's MMC controller has integrated DMA ability
-			 * in addition to being able to use the external DMA
-			 * controller. It moves DMA control bits to a separate
-			 * register. The DMA_SEL bit chooses the external
-			 * controller over the integrated one. Earlier SoCs
-			 * can only use the external controller, and have a
-			 * single DMA enable bit in CMDAT.
-			 */
-			if (host->version >= JZ_MMC_JZ4780) {
-				writel(JZ_MMC_DMAC_DMA_EN | JZ_MMC_DMAC_DMA_SEL,
-				       host->base + JZ_REG_MMC_DMAC);
-			} else {
 				cmdat |= JZ_MMC_CMDAT_DMA_EN;
-			}
+		} else if (use_sdma) {
+			/* TODO: Think about setting DMAC_MODE_SEL, as ingenic thinks it speeds
+			* things up.... */
 		} else {
 			jz47xx_mmc_prepare_pio_transfer(host);
 
@@ -996,6 +1121,9 @@ static int jz47xx_mmc_probe(struct platform_device *pdev)
 				goto err_free_host;
 		}
 	}
+
+	if (host->version >= JZ_MMC_JZ4780)
+		jz4780_mmc_init_dma(host);
 
 	/*
 	 * Check that the bus width specified in the DT or platform data is
