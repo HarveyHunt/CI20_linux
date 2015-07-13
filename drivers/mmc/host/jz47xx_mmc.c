@@ -49,14 +49,16 @@
 #define JZ_REG_MMC_BLKLEN		0x18
 #define JZ_REG_MMC_NOB			0x1C
 #define JZ_REG_MMC_SNOB			0x20
-#define JZ_REG_MMC_IMASK		0x24
-#define JZ_REG_MMC_IREG			0x28
+#define JZ_REG_MMC_IMASK	 	0x24
+#define JZ_REG_MMC_IREG			0x28 /* IFLG on 4780 */
 #define JZ_REG_MMC_CMD			0x2C
 #define JZ_REG_MMC_ARG			0x30
 #define JZ_REG_MMC_RESP_FIFO		0x34
 #define JZ_REG_MMC_RXFIFO		0x38
 #define JZ_REG_MMC_TXFIFO		0x3C
 #define JZ_REG_MMC_DMAC			0x44
+#define JZ_REG_MMC_DMANDA		0x48
+#define JZ_REG_MMC_DMACMD		0x54
 
 #define JZ_MMC_STRPCL_EXIT_MULTIPLE	BIT(7)
 #define JZ_MMC_STRPCL_EXIT_TRANSFER	BIT(6)
@@ -106,17 +108,39 @@
 #define JZ_MMC_CMDAT_RSP_R2		2
 #define JZ_MMC_CMDAT_RSP_R3		3
 
-#define JZ_MMC_IRQ_SDIO			BIT(7)
-#define JZ_MMC_IRQ_TXFIFO_WR_REQ	BIT(6)
-#define JZ_MMC_IRQ_RXFIFO_RD_REQ	BIT(5)
-#define JZ_MMC_IRQ_END_CMD_RES		BIT(2)
-#define JZ_MMC_IRQ_PRG_DONE		BIT(1)
-#define JZ_MMC_IRQ_DATA_TRAN_DONE	BIT(0)
+#define JZ_MMC_IMASK_DMAEND		BIT(16)
+#define JZ_MMC_IMASK_CRC_READ_ERR	BIT(11)
+#define JZ_MMC_IMASK_CRC_WRITE_ERR	BIT(10)
+#define JZ_MMC_IMASK_TIMEOUT_RES	BIT(9)
+#define JZ_MMC_IMASK_TIMEOUT_READ	BIT(8)
+#define JZ_MMC_IMASK_SDIO		BIT(7)
+#define JZ_MMC_IMASK_TXFIFO_WR_REQ	BIT(6)
+#define JZ_MMC_IMASK_RXFIFO_RD_REQ	BIT(5)
+#define JZ_MMC_IMASK_END_CMD_RES	BIT(2)
+#define JZ_MMC_IMASK_PRG_DONE		BIT(1)
+#define JZ_MMC_IMASK_DATA_TRAN_DONE	BIT(0)
 
+#define JZ_MMC_DMAC_AOFST_SHFT		5
+#define JZ_MMC_DMAC_AOFST_MASK		(0x3 << JZ_MMC_DMAC_AOFST_SHFT)
+#define JZ_MMC_DMAC_AOFST_0		(0 << JZ_MMC_DMAC_AOFST_SHFT)
+#define JZ_MMC_DMAC_AOFST_1		(1 << JZ_MMC_DMAC_AOFST_SHFT)
+#define JZ_MMC_DMAC_AOFST_2		(2 << JZ_MMC_DMAC_AOFST_SHFT)
+#define JZ_MMC_DMAC_AOFST_3		(3 << JZ_MMC_DMAC_AOFST_SHFT)
+#define JZ_MMC_DMAC_ALIGN_EN		BIT(4)
+#define JZ_MMC_DMAC_INCR_SHFT		2
+#define JZ_MMC_DMAC_INCR_MASK		(0x3 << JZ_MMC_DMAC_INCR_SHFT)
+#define JZ_MMC_DMAC_INCR16		(0 << JZ_MMC_DMAC_INCR_SHFT)
+#define JZ_MMC_DMAC_INCR32		(1 << JZ_MMC_DMAC_INCR_SHFT)
+#define JZ_MMC_DMAC_INCR64		(2 << JZ_MMC_DMAC_INCR_SHFT)
 #define JZ_MMC_DMAC_DMA_SEL		BIT(1)
 #define JZ_MMC_DMAC_DMA_EN		BIT(0)
 
+#define JZ_MMC_DMACMD_ENDI		BIT(1)
+#define JZ_MMC_DMACMD_LINK		BIT(0)
+
 #define JZ_MMC_CLK_RATE			24000000
+
+#define JZ_MMC_MAX_SEGS			128
 
 enum jz47xx_mmc_version {
 	JZ_MMC_JZ4740,
@@ -316,7 +340,7 @@ static bool jz47xx_mmc_write_pio(struct jz47xx_mmc_host *host,
 		i = i & 0x7;
 		while (j) {
 			timeout = jz47xx_mmc_poll_irq(host,
-						JZ_MMC_IRQ_TXFIFO_WR_REQ);
+						JZ_MMC_IMASK_TXFIFO_WR_REQ);
 			if (unlikely(timeout))
 				goto poll_timeout;
 
@@ -333,7 +357,7 @@ static bool jz47xx_mmc_write_pio(struct jz47xx_mmc_host *host,
 		}
 		if (unlikely(i)) {
 			timeout = jz47xx_mmc_poll_irq(host,
-						JZ_MMC_IRQ_TXFIFO_WR_REQ);
+						JZ_MMC_IMASK_TXFIFO_WR_REQ);
 			if (unlikely(timeout))
 				goto poll_timeout;
 
@@ -375,7 +399,7 @@ static bool jz47xx_mmc_read_pio(struct jz47xx_mmc_host *host,
 		i = i & 0x1f;
 		while (j) {
 			timeout = jz47xx_mmc_poll_irq(host,
-						JZ_MMC_IRQ_RXFIFO_RD_REQ);
+						JZ_MMC_IMASK_RXFIFO_RD_REQ);
 			if (unlikely(timeout))
 				goto poll_timeout;
 
@@ -394,7 +418,7 @@ static bool jz47xx_mmc_read_pio(struct jz47xx_mmc_host *host,
 
 		if (unlikely(i)) {
 			timeout = jz47xx_mmc_poll_irq(host,
-						JZ_MMC_IRQ_RXFIFO_RD_REQ);
+						JZ_MMC_IMASK_RXFIFO_RD_REQ);
 			if (unlikely(timeout))
 				goto poll_timeout;
 
@@ -508,7 +532,7 @@ static void jz47xx_mmc_timeout(unsigned long data)
 	if (!test_and_clear_bit(0, &host->waiting))
 		return;
 
-	jz47xx_mmc_set_irq_enabled(host, JZ_MMC_IRQ_END_CMD_RES, false);
+	jz47xx_mmc_set_irq_enabled(host, JZ_MMC_IMASK_END_CMD_RES, false);
 
 	host->req->cmd->error = -ETIMEDOUT;
 	jz47xx_mmc_request_done(host);
@@ -658,12 +682,12 @@ static irqreturn_t jz47xx_mmc_irq_worker(int irq, void *devid)
 
 		jz47xx_mmc_transfer_check_state(host, cmd->data);
 
-		timeout = jz47xx_mmc_poll_irq(host, JZ_MMC_IRQ_DATA_TRAN_DONE);
+		timeout = jz47xx_mmc_poll_irq(host, JZ_MMC_IMASK_DATA_TRAN_DONE);
 		if (unlikely(timeout)) {
 			host->state = JZ_MMC_STATE_SEND_STOP;
 			break;
 		}
-		jz47xx_mmc_write_irq_reg(host, JZ_MMC_IRQ_DATA_TRAN_DONE);
+		jz47xx_mmc_write_irq_reg(host, JZ_MMC_IMASK_DATA_TRAN_DONE);
 
 	case JZ_MMC_STATE_SEND_STOP:
 		if (!req->stop)
@@ -673,7 +697,7 @@ static irqreturn_t jz47xx_mmc_irq_worker(int irq, void *devid)
 
 		if (mmc_resp_type(req->stop) & MMC_RSP_BUSY) {
 			timeout = jz47xx_mmc_poll_irq(host,
-						      JZ_MMC_IRQ_PRG_DONE);
+						      JZ_MMC_IMASK_PRG_DONE);
 			if (timeout) {
 				host->state = JZ_MMC_STATE_DONE;
 				break;
@@ -701,16 +725,16 @@ static irqreturn_t jz47xx_mmc_irq(int irq, void *devid)
 	tmp = irq_reg;
 	irq_reg &= ~host->irq_mask;
 
-	tmp &= ~(JZ_MMC_IRQ_TXFIFO_WR_REQ | JZ_MMC_IRQ_RXFIFO_RD_REQ |
-		JZ_MMC_IRQ_PRG_DONE | JZ_MMC_IRQ_DATA_TRAN_DONE);
+	tmp &= ~(JZ_MMC_IMASK_TXFIFO_WR_REQ | JZ_MMC_IMASK_RXFIFO_RD_REQ |
+		JZ_MMC_IMASK_PRG_DONE | JZ_MMC_IMASK_DATA_TRAN_DONE);
 
 	if (tmp != irq_reg)
 		jz47xx_mmc_write_irq_reg(host, tmp & ~irq_reg);
 
-	if (irq_reg & JZ_MMC_IRQ_SDIO) {
-		jz47xx_mmc_write_irq_reg(host, JZ_MMC_IRQ_SDIO);
+	if (irq_reg & JZ_MMC_IMASK_SDIO) {
+		jz47xx_mmc_write_irq_reg(host, JZ_MMC_IMASK_SDIO);
 		mmc_signal_sdio_irq(host->mmc);
-		irq_reg &= ~JZ_MMC_IRQ_SDIO;
+		irq_reg &= ~JZ_MMC_IMASK_SDIO;
 	}
 
 	if (host->req && cmd && irq_reg) {
@@ -769,7 +793,7 @@ static void jz47xx_mmc_request(struct mmc_host *mmc, struct mmc_request *req)
 	host->req = req;
 
 	jz47xx_mmc_write_irq_reg(host, 0xffffffff);
-	jz47xx_mmc_set_irq_enabled(host, JZ_MMC_IRQ_END_CMD_RES, true);
+	jz47xx_mmc_set_irq_enabled(host, JZ_MMC_IMASK_END_CMD_RES, true);
 
 	host->state = JZ_MMC_STATE_READ_RESPONSE;
 	set_bit(0, &host->waiting);
@@ -828,7 +852,7 @@ static void jz47xx_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 static void jz47xx_mmc_enable_sdio_irq(struct mmc_host *mmc, int enable)
 {
 	struct jz47xx_mmc_host *host = mmc_priv(mmc);
-	jz47xx_mmc_set_irq_enabled(host, JZ_MMC_IRQ_SDIO, enable);
+	jz47xx_mmc_set_irq_enabled(host, JZ_MMC_IMASK_SDIO, enable);
 }
 
 static const struct mmc_host_ops jz47xx_mmc_ops = {
