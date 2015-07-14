@@ -793,6 +793,9 @@ static irqreturn_t jz47xx_mmc_irq_worker(int irq, void *devid)
 				cmd->error = -ETIMEDOUT;
 				break;
 			}
+		} else if (host->version >= JZ_MMC_JZ4780 && host->desc_hds) {
+			jz4780_mmc_submit_dma(host, cmd->data);
+			jz4780_mmc_start_dma(host, cmd->data);
 		} else {
 			if (cmd->data->flags & MMC_DATA_READ)
 				timeout = jz47xx_mmc_read_pio(host, cmd->data);
@@ -852,6 +855,9 @@ static irqreturn_t jz47xx_mmc_irq(int irq, void *devid)
 
 	tmp &= ~(JZ_MMC_IMASK_TXFIFO_WR_REQ | JZ_MMC_IMASK_RXFIFO_RD_REQ |
 		JZ_MMC_IMASK_PRG_DONE | JZ_MMC_IMASK_DATA_TRAN_DONE);
+
+	if (host->version >= JZ_MMC_JZ4780)
+		tmp &= ~JZ_MMC_IMASK_DMAEND;
 
 	if (tmp != irq_reg)
 		jz47xx_mmc_write_irq_reg(host, tmp & ~irq_reg);
