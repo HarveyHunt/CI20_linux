@@ -290,6 +290,13 @@ static void jz47xx_mmc_request_done(struct jz47xx_mmc_host *host)
 		dma_unmap_sg(host->dmac->device->dev, data->sg, data->sg_len,
 			     ((data->flags & MMC_DATA_READ) ?
 			     DMA_FROM_DEVICE : DMA_TO_DEVICE));
+	} else if (data && host->desc_hds && host->version >= JZ_MMC_JZ4780) {
+		if (!data->error)
+			data->bytes_xfered += data->blocks * data->blksz;
+
+		dma_unmap_sg(&host->pdev->dev, data->sg, data->sg_len,
+			data->flags & MMC_DATA_WRITE
+			? DMA_TO_DEVICE : DMA_FROM_DEVICE);
 	}
 
 	mmc_request_done(host->mmc, req);
@@ -635,10 +642,6 @@ static void jz4780_mmc_submit_dma(struct jz47xx_mmc_host *host, struct mmc_data 
 	struct scatterlist *sg_entry;
 	struct jz4780_sdma_desc_hd *dhd = &(host->desc_hds[0]);
 
-	dma_map_sg(&host->pdev->dev, data->sg, data->sg_len,
-		   data->flags & MMC_DATA_WRITE
-		   ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-
 	for_each_sg(data->sg, sg_entry, data->sg_len, i) {
 		dhd->dma_desc->da = sg_phys(sg_entry);
 		dhd->dma_desc->len = sg_dma_len(sg_entry);
@@ -653,10 +656,6 @@ static void jz4780_mmc_submit_dma(struct jz47xx_mmc_host *host, struct mmc_data 
 			}
 		}
 	}
-
-	dma_unmap_sg(&host->pdev->dev, data->sg, data->sg_len,
-		     data->flags & MMC_DATA_WRITE
-		     ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
 
 	if (data->flags & MMC_DATA_READ)
 		dhd->dma_desc->dma_cmd |= JZ_MMC_DMACMD_ENDI;
@@ -685,6 +684,10 @@ static bool jz4780_mmc_prepare_dma_transfer(struct jz47xx_mmc_host *host)
 
 	host->cmdat |= cmdat;
 	writel(cmdat, host->base + JZ_REG_MMC_CMDAT);
+
+	dma_map_sg(&host->pdev->dev, data->sg, data->sg_len,
+		   data->flags & MMC_DATA_WRITE
+		   ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
 
 	jz47xx_mmc_write_irq_reg(host, JZ_MMC_IMASK_PRG_DONE);
 	jz47xx_mmc_set_irq_enabled(host, imask, true);
