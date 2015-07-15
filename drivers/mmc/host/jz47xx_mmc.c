@@ -737,7 +737,8 @@ static void jz47xx_mmc_send_command(struct jz47xx_mmc_host *host,
 		else
 			host->desc = jz47xx_mmc_prepare_dma_transfer(host);
 
-		if (host->desc) {
+		/* JZ_MMC_CMDAT_DMA_EN isn't available on JZ4780. */
+		if (host->desc && host->version < JZ_MMC_JZ4780) {
 				cmdat |= JZ_MMC_CMDAT_DMA_EN;
 		} else if (use_sdma) {
 			/* TODO: Think about setting DMAC_MODE_SEL, as ingenic thinks it speeds
