@@ -666,24 +666,19 @@ static bool jz4780_mmc_prepare_dma_transfer(struct jz47xx_mmc_host *host)
 {
 	struct mmc_command *cmd = host->req->cmd;
 	struct mmc_data *data = cmd->data;
-	uint32_t cmdat = 0, imask;
+	uint32_t imask;
 
 	if(!host->desc_hds)
 		return false;
 
 	if (data->flags & MMC_DATA_WRITE) {
-		cmdat |= JZ_MMC_CMDAT_WRITE;
 		imask = JZ_MMC_IMASK_PRG_DONE
 			| JZ_MMC_IMASK_CRC_WRITE_ERR;
 	} else {
-		cmdat &= JZ_MMC_CMDAT_WRITE;
 		imask = JZ_MMC_IMASK_TIMEOUT_READ
 			| JZ_MMC_IMASK_DATA_TRAN_DONE
 			| JZ_MMC_IMASK_CRC_READ_ERR;
 	}
-
-	host->cmdat |= cmdat;
-	writel(cmdat, host->base + JZ_REG_MMC_CMDAT);
 
 	dma_map_sg(&host->pdev->dev, data->sg, data->sg_len,
 		   data->flags & MMC_DATA_WRITE
