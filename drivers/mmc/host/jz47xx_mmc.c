@@ -131,6 +131,11 @@ enum jz47xx_mmc_state {
 	JZ_MMC_STATE_DONE,
 };
 
+struct jz47xx_mmc_next_dma {
+	unsigned int sg_len;
+	s32 cookie;
+};
+
 struct jz47xx_mmc_host {
 	struct mmc_host *mmc;
 	struct platform_device *pdev;
@@ -147,6 +152,7 @@ struct jz47xx_mmc_host {
 	struct mmc_request *req;
 	struct mmc_command *cmd;
 	struct dma_async_tx_descriptor *desc;
+	unsigned int sg_len;
 
 	unsigned long waiting;
 
@@ -159,6 +165,8 @@ struct jz47xx_mmc_host {
 	struct timer_list timeout_timer;
 	struct sg_mapping_iter miter;
 	enum jz47xx_mmc_state state;
+
+	struct jz47xx_mmc_next_dma next_dma;
 };
 
 static uint32_t jz47xx_mmc_read_irq_reg(struct jz47xx_mmc_host *host)
@@ -690,6 +698,38 @@ static irqreturn_t jz47xx_mmc_irq_worker(int irq, void *devid)
 	return IRQ_HANDLED;
 }
 
+static void jz47xx_mmc_pre_req(struct mmc_host *mmc,
+				struct mmc_request *mrq,
+				bool is_first_req)
+{
+	struct jz47xx_mmc_host *host = mmc_priv(mmc);
+	struct jz47xx_mmc_next_dma *next_data = &host->next_dma;
+	struct mmc_data *data = mrq->data;
+
+	if (host->desc) {
+		/* Prepare DMa transfer here... */
+	}
+
+}
+
+static void jz47xx_mmc_post_req(struct mmc_host *mmc,
+				struct mmc_request *mrq,
+				int err)
+{
+	struct mmc_data *data = mrq->data;
+	struct jz47xx_mmc_host *host = mmc_priv(mmc);
+
+	if (host->desc && data->host_cookie) {
+		dma_unmap_sg(host->dmac->device->dev, data->sg, data->sg_len,
+			     ((data->flags & MMC_DATA_READ) ?
+			     DMA_FROM_DEVICE : DMA_TO_DEVICE));
+		data->host_cookie = 0;
+	}
+
+	if (err)
+		dmaengine_terminate_all(host->dmac);
+}
+
 static irqreturn_t jz47xx_mmc_irq(int irq, void *devid)
 {
 	struct jz47xx_mmc_host *host = devid;
@@ -833,6 +873,8 @@ static void jz47xx_mmc_enable_sdio_irq(struct mmc_host *mmc, int enable)
 
 static const struct mmc_host_ops jz47xx_mmc_ops = {
 	.request	= jz47xx_mmc_request,
+	.pre_req	= jz47xx_mmc_pre_req,
+	.post_req	= jz47xx_mmc_post_req,
 	.set_ios	= jz47xx_mmc_set_ios,
 	.get_ro		= mmc_gpio_get_ro,
 	.get_cd		= mmc_gpio_get_cd,
