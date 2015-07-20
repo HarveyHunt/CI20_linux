@@ -456,6 +456,43 @@ static void jz47xx_mmc_prepare_pio_transfer(struct jz47xx_mmc_host *host)
 	sg_miter_start(&host->miter, data->sg, data->sg_len, direction);
 }
 
+static int jz47xx_mmc_pre_dma_transfer(struct jz47xx_mmc_host *host,
+					struct mmc_data *data,
+					struct jz47xx_mmc_next_dma *next)
+{
+	struct jz47xx_mmc_next_dma *next_dma = &host->next_dma;
+	unsigned int sg_len;
+
+	if (!next && data->host_cookie
+			&& data->host_cookie != next_dma->cookie) {
+		dev_warn(&host->pdev->dev, "Invalid cookie: data->host_cookie=%d,"
+				" host->next_dma.cookie=%d\n", data->host_cookie,
+				next_dma->cookie);
+		data->host_cookie = 0;
+	}
+
+	if (next || data->host_cookie != next_dma->cookie) {
+		sg_len = dma_map_sg(host->dmac->device->dev, data->sg,
+				data->sg_len, ((data->flags & MMC_DATA_READ) ?
+				DMA_FROM_DEVICE : DMA_TO_DEVICE));
+	} else {
+		sg_len = next_dma->sg_len;
+		next_dma->sg_len = 0;
+	}
+
+	if (sg_len <= 0) {
+		dev_err(&host->pdev->dev, "Failed to map sg for DMA\n");
+		return -EINVAL;
+	}
+
+	if (next) {
+		next->sg_len = sg_len;
+		data->host_cookie = ++next->cookie < 0 ? 1 : next->cookie;
+	} else {
+		host->sg_len = sg_len;
+	}
+}
+
 static struct dma_async_tx_descriptor *jz47xx_mmc_prepare_dma_transfer(
 	struct jz47xx_mmc_host *host)
 {
