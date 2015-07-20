@@ -153,6 +153,7 @@ struct jz47xx_mmc_host {
 	struct mmc_command *cmd;
 	struct dma_async_tx_descriptor *desc;
 	unsigned int sg_len;
+	bool use_dma;
 
 	unsigned long waiting;
 
@@ -246,20 +247,15 @@ static void jz47xx_mmc_request_done(struct jz47xx_mmc_host *host)
 	struct mmc_request *req = host->req;
 	struct mmc_data *data = req->cmd->data;
 
-	host->req = NULL;
-
 	if (data && host->desc) {
 		if (!data->error)
 			data->bytes_xfered += data->blocks * data->blksz;
 
 		host->desc = NULL;
-
 		dmaengine_terminate_all(host->dmac);
-		dma_unmap_sg(host->dmac->device->dev, data->sg, data->sg_len,
-			     ((data->flags & MMC_DATA_READ) ?
-			     DMA_FROM_DEVICE : DMA_TO_DEVICE));
 	}
 
+	host->req = NULL;
 	mmc_request_done(host->mmc, req);
 }
 
@@ -491,25 +487,26 @@ static int jz47xx_mmc_pre_dma_transfer(struct jz47xx_mmc_host *host,
 	} else {
 		host->sg_len = sg_len;
 	}
+
+	return 0;
 }
 
-static struct dma_async_tx_descriptor *jz47xx_mmc_prepare_dma_transfer(
-	struct jz47xx_mmc_host *host)
+static void jz47xx_mmc_dma_complete_func(void *completion)
 {
-	struct mmc_command *cmd = host->req->cmd;
-	struct mmc_data *data = cmd->data;
+	complete(completion);
+}
+
+static int jz47xx_mmc_start_dma_transfer(struct jz47xx_mmc_host *host,
+					struct mmc_data* data)
+{
 	struct dma_slave_config config;
 	struct dma_async_tx_descriptor *desc;
-	int ret, sg_len;
+	int ret;
 
-	if (!host->dmac)
-		return NULL;
-
-	sg_len = dma_map_sg(host->dmac->device->dev, data->sg, data->sg_len,
-			    ((data->flags & MMC_DATA_READ) ?
-			    DMA_FROM_DEVICE : DMA_TO_DEVICE));
-	if (sg_len == 0)
-		return NULL;
+	config.src_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
+	config.dst_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
+	config.src_maxburst = 8;
+	config.dst_maxburst = 8;
 
 	if (data->flags & MMC_DATA_READ) {
 		config.direction = DMA_DEV_TO_MEM;
@@ -519,10 +516,9 @@ static struct dma_async_tx_descriptor *jz47xx_mmc_prepare_dma_transfer(
 		config.dst_addr = host->phys_base + JZ_REG_MMC_TXFIFO;
 	}
 
-	config.src_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
-	config.dst_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
-	config.src_maxburst = 8;
-	config.dst_maxburst = 8;
+	ret = jz47xx_mmc_pre_dma_transfer(host, data, NULL);
+	if (ret)
+		return ret;
 
 	ret = dmaengine_slave_config(host->dmac, &config);
 	if (ret) {
@@ -530,20 +526,29 @@ static struct dma_async_tx_descriptor *jz47xx_mmc_prepare_dma_transfer(
 		goto err_unmap_sg;
 	}
 
-	desc = dmaengine_prep_slave_sg(host->dmac, data->sg, sg_len,
+	desc = dmaengine_prep_slave_sg(host->dmac, data->sg, host->sg_len,
 				       config.direction, 0);
+
 	if (!desc) {
 		dev_err(&host->pdev->dev, "DMA slave prepare failed\n");
 		goto err_unmap_sg;
 	}
 
-	return desc;
+	host->desc = desc;
+
+	dmaengine_submit(host->desc);
+	init_completion(&host->comp);
+	host->desc->callback = jz47xx_mmc_dma_complete_func;
+	host->desc->callback_param = &host->comp;
+	dma_async_issue_pending(host->dmac);
+
+	return ret;
 
 err_unmap_sg:
 	dma_unmap_sg(host->dmac->device->dev, data->sg, data->sg_len,
 		     ((data->flags & MMC_DATA_READ) ?
 		     DMA_FROM_DEVICE : DMA_TO_DEVICE));
-	return NULL;
+	return -ENOMEM;
 }
 
 static void jz47xx_mmc_timeout(unsigned long data)
@@ -616,34 +621,16 @@ static void jz47xx_mmc_send_command(struct jz47xx_mmc_host *host,
 			cmdat |= JZ_MMC_CMDAT_WRITE;
 		if (cmd->data->flags & MMC_DATA_STREAM)
 			cmdat |= JZ_MMC_CMDAT_STREAM;
+		if (host->use_dma) {
+			if (host->version < JZ_MMC_JZ4780)
+				cmdat |= JZ_MMC_CMDAT_DMA_EN;
+			else
+				writel(JZ_MMC_DMAC_DMA_EN | JZ_MMC_DMAC_DMA_SEL,
+					host->base + JZ_REG_MMC_DMAC);
+		}
 
 		writew(cmd->data->blksz, host->base + JZ_REG_MMC_BLKLEN);
 		writew(cmd->data->blocks, host->base + JZ_REG_MMC_NOB);
-
-		/* Fall back to PIO if we have no DMA channel or setup fails. */
-		host->desc = jz47xx_mmc_prepare_dma_transfer(host);
-		if (host->desc) {
-			/*
-			 * The 4780's MMC controller has integrated DMA ability
-			 * in addition to being able to use the external DMA
-			 * controller. It moves DMA control bits to a separate
-			 * register. The DMA_SEL bit chooses the external
-			 * controller over the integrated one. Earlier SoCs
-			 * can only use the external controller, and have a
-			 * single DMA enable bit in CMDAT.
-			 */
-			if (host->version >= JZ_MMC_JZ4780) {
-				writel(JZ_MMC_DMAC_DMA_EN | JZ_MMC_DMAC_DMA_SEL,
-				       host->base + JZ_REG_MMC_DMAC);
-			} else {
-				cmdat |= JZ_MMC_CMDAT_DMA_EN;
-			}
-		} else {
-			jz47xx_mmc_prepare_pio_transfer(host);
-
-			if (host->version >= JZ_MMC_JZ4780)
-				writel(0, host->base + JZ_REG_MMC_DMAC);
-		}
 	}
 
 	writeb(cmd->opcode, host->base + JZ_REG_MMC_CMD);
@@ -651,11 +638,6 @@ static void jz47xx_mmc_send_command(struct jz47xx_mmc_host *host,
 	writel(cmdat, host->base + JZ_REG_MMC_CMDAT);
 
 	jz47xx_mmc_clock_enable(host, 1);
-}
-
-static void jz47xx_mmc_dma_complete_func(void *completion)
-{
-	complete(completion);
 }
 
 static irqreturn_t jz47xx_mmc_irq_worker(int irq, void *devid)
@@ -676,15 +658,13 @@ static irqreturn_t jz47xx_mmc_irq_worker(int irq, void *devid)
 		if (!cmd->data)
 			break;
 
+		jz47xx_mmc_prepare_pio_transfer(host);
+
 	case JZ_MMC_STATE_TRANSFER_DATA:
-		if (host->desc) {
-			dmaengine_submit(host->desc);
-			init_completion(&host->comp);
-			host->desc->callback = jz47xx_mmc_dma_complete_func;
-			host->desc->callback_param = &host->comp;
-			dma_async_issue_pending(host->dmac);
+		if (host->use_dma) {
+			jz47xx_mmc_start_dma_transfer(host, cmd->data);
 			timeout = wait_for_completion_timeout(&host->comp,
-							msecs_to_jiffies(1000));
+						msecs_to_jiffies(1000));
 			if (timeout == 0) {
 				cmd->error = -ETIMEDOUT;
 				break;
@@ -740,11 +720,16 @@ static void jz47xx_mmc_pre_req(struct mmc_host *mmc,
 				bool is_first_req)
 {
 	struct jz47xx_mmc_host *host = mmc_priv(mmc);
-	struct jz47xx_mmc_next_dma *next_data = &host->next_dma;
+	struct jz47xx_mmc_next_dma *next_dma = &host->next_dma;
 	struct mmc_data *data = mrq->data;
+	int ret;
 
-	if (host->desc) {
-		/* Prepare DMa transfer here... */
+	BUG_ON(data->host_cookie);
+
+	if (host->use_dma) {
+		ret = jz47xx_mmc_pre_dma_transfer(host, data, next_dma);
+		if (ret)
+			data->host_cookie = 0;
 	}
 
 }
@@ -756,15 +741,13 @@ static void jz47xx_mmc_post_req(struct mmc_host *mmc,
 	struct mmc_data *data = mrq->data;
 	struct jz47xx_mmc_host *host = mmc_priv(mmc);
 
-	if (host->desc && data->host_cookie) {
+	if (host->use_dma && data->host_cookie) {
 		dma_unmap_sg(host->dmac->device->dev, data->sg, data->sg_len,
 			     ((data->flags & MMC_DATA_READ) ?
 			     DMA_FROM_DEVICE : DMA_TO_DEVICE));
 		data->host_cookie = 0;
 	}
 
-	if (err)
-		dmaengine_terminate_all(host->dmac);
 }
 
 static irqreturn_t jz47xx_mmc_irq(int irq, void *devid)
@@ -1000,6 +983,14 @@ static int jz47xx_mmc_probe(struct platform_device *pdev)
 
 	/* If we fail to get a DMA channel we will fall back on PIO mode. */
 	host->dmac = dma_request_slave_channel(&pdev->dev, "rx-tx");
+	if (host->dmac) {
+		host->use_dma = true;
+		host->next_dma.cookie = 1;
+	} else {
+		dev_warn(&pdev->dev, "Unable to request DMA slave channel - falling back"
+					" to PIO mode\n");
+		host->use_dma = false;
+	}
 
 	pdata = pdev->dev.platform_data;
 	match = of_match_device(of_match_ptr(jz47xx_mmc_of_match), &pdev->dev);
@@ -1113,6 +1104,7 @@ static int jz47xx_mmc_probe(struct platform_device *pdev)
 	}
 
 	dev_info(&pdev->dev, "JZ SD/MMC card driver registered\n");
+
 	return 0;
 
 err_gpio_bulk_free:
