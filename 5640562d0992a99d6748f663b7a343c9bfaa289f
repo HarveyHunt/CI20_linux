@@ -1,6 +1,2 @@
 skip: all
-XXX  (you can optionally change the "all" above to the name of the
-XXX  upstream branch if you want to limit blacklisting to that upstream)
-
-XXX  Enter your justification for blacklisting here or
-XXX  remove the whole note to cancel blacklisting.
+Blacklited to test notes
